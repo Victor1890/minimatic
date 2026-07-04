@@ -15,7 +15,7 @@ The core symbolic computation engine is complete.
 | Immutable symbols with interning | ✅ Done |
 | Immutable expressions `(head, args, attrs)` | ✅ Done |
 | Evaluation attributes (Hold, Flat, Orderless, Listable) | ✅ Done |
-| Standard evaluation procedure (10-step loop) | ✅ Done |
+| Evaluation procedure | ✅ Done |
 | Pattern matching with backtracking | ✅ Done |
 | Bindings (immutable, frozenset-backed) | ✅ Done |
 | Evaluation contexts with scoping | ✅ Done |

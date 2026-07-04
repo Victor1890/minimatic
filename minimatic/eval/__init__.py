@@ -14,6 +14,7 @@ from .context import (
     with_context,
 )
 from .evaluator import FixedPoint, evaluate, evaluate_iterated, try_evaluate
+from .pipeline import BuiltinFallback, PipelineRule, RulePipeline, RuleSource
 from .rules import Rule, RuleDelayed, RuleType, apply_rule, is_rule, is_rule_delayed, try_rules
 from .transforms import (
     apply_flat,
@@ -43,6 +44,11 @@ __all__ = [
     "try_evaluate",
     "FixedPoint",
     "evaluate_iterated",
+    # Pipeline
+    "RulePipeline",
+    "PipelineRule",
+    "RuleSource",
+    "BuiltinFallback",
     # Rules
     "Rule",
     "RuleDelayed",

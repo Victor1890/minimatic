@@ -60,6 +60,13 @@ def register_builtin(
             symbol=sym, implementation=func, attributes=attrs, auto_evaluate=auto_evaluate
         )
         _registry[sym] = builtin
+
+        # Also register in the global context's pipeline
+        from minimatic.eval.context import GlobalContext
+        from minimatic.eval.pipeline import BuiltinFallback
+
+        GlobalContext.pipeline.add_builtin(BuiltinFallback(sym, func, attrs))
+
         return func
 
     return decorator

@@ -22,7 +22,6 @@ from minimatic.core import (
     is_expr,
     is_symbol,
 )
-from minimatic.pattern import match, replace_with_bindings
 
 from .context import EvaluationContext, get_current_context
 from .transforms import apply_flat, apply_listable, apply_orderless, flatten_sequences
@@ -145,6 +144,9 @@ def evaluate(expr: Any, context: EvaluationContext | None = None) -> Any:
 
 def _evaluate_symbol(sym: Symbol, context: EvaluationContext) -> Any:
     """Evaluate a symbol by applying its OwnValues."""
+    from minimatic.pattern import match as pattern_match
+    from minimatic.pattern import replace_with_bindings
+
     own_values = context.get_own_values(sym)
 
     if not own_values:
@@ -152,9 +154,21 @@ def _evaluate_symbol(sym: Symbol, context: EvaluationContext) -> Any:
 
     # Try each OwnValue rule
     for pattern_expr, replacement, condition in own_values:
-        result, success = _try_definition(pattern_expr, replacement, condition, sym, context)
-        if success:
-            return evaluate(result, context)  # Re-evaluate result
+        match_result = pattern_match(pattern_expr, sym)
+
+        if not match_result:
+            continue
+
+        # Check condition if present
+        if condition is not None:
+            cond_substituted = replace_with_bindings(condition, match_result.bindings)
+            cond_result = evaluate(cond_substituted, context)
+            if cond_result is not True and cond_result != Symbol("True"):
+                continue
+
+        # Apply replacement and re-evaluate
+        result = replace_with_bindings(replacement, match_result.bindings)
+        return evaluate(result, context)
 
     return sym
 
@@ -298,99 +312,17 @@ def _evaluate_arguments(
 
 def _apply_rules(expr: Expression, context: EvaluationContext) -> Any:
     """
-    Step 3h: Apply rules in priority order:
-    a. UpValues - check arguments left-to-right; first wins
-    b. DownValues - check head's rewrite rules
-    c. SubValues - if head is Expression[sym, ...], check sym
-    d. NValues - for numeric approximation (N[...])
-    e. Built-in - native implementation of head
+    Step 3h: Apply rules via the functional pipeline.
+
+    Delegates to RulePipeline which handles:
+    - UpValues (from arguments)
+    - DownValues (from head symbol)
+    - SubValues (from head expression)
+    - NValues (numeric approximation)
+    - Built-in fallback
+    - User-defined interception rules
     """
-
-    # a. UpValues: check arguments left-to-right
-    for arg in expr.args:
-        if is_symbol(arg):
-            up_values = context.get_up_values(arg)
-            if up_values:
-                result = _try_value_rules(up_values, expr, context)
-                if result != expr:
-                    return result
-        elif is_expr(arg) and is_symbol(arg.head):
-            up_values = context.get_up_values(arg.head)
-            if up_values:
-                result = _try_value_rules(up_values, expr, context)
-                if result != expr:
-                    return result
-
-    # b. DownValues: check head's definitions
-    if is_symbol(expr.head):
-        down_values = context.get_down_values(expr.head)
-        if down_values:
-            result = _try_value_rules(down_values, expr, context)
-            if result != expr:
-                return result
-
-    # c. SubValues: for f[a][b] patterns
-    if is_expr(expr.head):
-        sub_sym = expr.head.head if is_symbol(expr.head.head) else None
-        if sub_sym is not None:
-            sub_values = context.get_sub_values(sub_sym)
-            if sub_values:
-                result = _try_value_rules(sub_values, expr, context)
-                if result != expr:
-                    return result
-
-    # d. NValues: for N[expr] numeric approximation
-    # Check if this is inside N[]
-    # For now, handled via DownValues on N
-
-    # e. Built-in: native implementation
-    result = _try_builtin(expr, context)
-
-    return result
-
-
-def _try_value_rules(rules_list: list, expr: Expression, context: EvaluationContext) -> Any:
-    """Try a list of value entries (pattern, replacement, condition) against expr."""
-    for pattern_expr, replacement, condition in rules_list:
-        result, success = _try_definition(pattern_expr, replacement, condition, expr, context)
-        if success:
-            return result
-    return expr
-
-
-def _try_definition(
-    pattern_expr: Any,
-    replacement: Any,
-    condition: Any | None,
-    expr: Any,
-    context: EvaluationContext,
-) -> tuple[Any, bool]:
-    """Try a single definition against an expression."""
-    # Match pattern
-    match_result = match(pattern_expr, expr)
-
-    if not match_result:
-        return expr, False
-
-    # Check condition if present
-    if condition is not None:
-        cond_substituted = replace_with_bindings(condition, match_result.bindings)
-        cond_result = evaluate(cond_substituted, context)
-
-        # Must be True to proceed
-        if cond_result is not True and cond_result != Symbol("True"):
-            return expr, False
-
-    # Apply replacement
-    result = replace_with_bindings(replacement, match_result.bindings)
-
-    return result, True
-
-
-def _try_builtin(expr: Expression, context: EvaluationContext) -> Any:
-    """Try to apply built-in function implementation."""
-    dispatch = _get_builtin_dispatch()
-    return dispatch(expr, context)
+    return context.pipeline.apply(expr, context)
 
 
 def try_evaluate(

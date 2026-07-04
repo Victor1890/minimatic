@@ -26,6 +26,7 @@ minimatic/
   eval/          Evaluation engine
     evaluator.py   Standard evaluation procedure
     context.py     Evaluation contexts with scoping
+    pipeline.py    Functional rule pipeline (pattern-matching dispatch)
     rules.py       Rule and RuleDelayed types
     values.py      OwnValues, DownValues, UpValues, SubValues, NValues
     transforms.py  Sequence flattening, Flat, Orderless, Listable transforms
@@ -101,8 +102,20 @@ The evaluator implements the standard Wolfram Language evaluation procedure:
 6. Apply Flat           Plus[Plus[a,b], c] → Plus[a,b,c]
 7. Apply Orderless      canonical sort arguments
 8. Apply Listable       f[{a,b}, c] → {f[a,c], f[b,c]}
-9. Try rules            UpValues → DownValues → SubValues → NValues → Built-in
+9. Try rules            via functional RulePipeline (see below)
 10. Fixed-point check   if changed, re-evaluate (up to $IterationLimit)
+```
+
+Step 9 delegates to `RulePipeline`, a functional rule application engine that uses the pattern matcher to apply rules from multiple sources in priority order:
+
+```
+1. User intercept-before rules   (highest priority)
+2. UpValues                      (from arguments, indexed by arg symbol)
+3. DownValues                    (from head symbol, indexed by head)
+4. SubValues                     (from head expression)
+5. NValues                       (numeric approximation)
+6. Built-in fallback             (native implementation)
+7. User intercept-after rules    (lowest priority)
 ```
 
 ```python
@@ -136,6 +149,52 @@ evaluate(Expression(Plus, Expression(Plus, 1, 2), 3), ctx) # 6 (Flat)
 | `UpValues` | Operator overloading (`expr_f := ...`) |
 | `SubValues` | Subscripted functions (`f[a][b] := ...`) |
 | `NValues` | Numeric approximation (`N[expr]`) |
+
+### Extending Evaluation with the Rule Pipeline
+
+The rule pipeline lets you intercept, override, or extend evaluation by adding pattern-matching rules at specific priority levels.
+
+```python
+from minimatic.core import Symbol, Expression
+from minimatic.eval import evaluate, EvaluationContext
+from minimatic.eval.pipeline import PipelineRule, RuleSource
+from minimatic.pattern import pattern, blank
+
+Plus = Symbol("Plus")
+x, y = Symbol("x"), Symbol("y")
+
+ctx = EvaluationContext("custom")
+
+# Add a simplification rule: Plus[0, x_] → x
+zero_plus = Expression(Plus, 0, pattern(x, blank()))
+ctx.pipeline.add_rule(PipelineRule(zero_plus, x))
+
+evaluate(Expression(Plus, 0, 5), ctx)  # 5
+
+# Add a rule that fires before all others (including builtins)
+pat = Expression(Plus, pattern(x, blank()), pattern(y, blank()))
+ctx.pipeline.add_intercept_before(
+    PipelineRule(pat, lambda b: b[x] + b[y] if isinstance(b[x], int) and isinstance(b[y], int) else Expression(Plus, b[x], b[y]))
+)
+
+# Add an UpValue (operator overloading on an argument)
+F = Symbol("F")
+ctx.pipeline.add_up_value(
+    PipelineRule(Expression(F, x), Symbol("special")),
+    x,  # indexed by this argument symbol
+)
+
+# Context inheritance: child contexts inherit parent rules
+child_ctx = EvaluationContext("child", parent=ctx)
+evaluate(Expression(Plus, 0, 3), child_ctx)  # 5 (inherited rule)
+```
+
+| Method | Priority | Description |
+|--------|----------|-------------|
+| `add_intercept_before(rule)` | 1000+ | Fires before everything, including builtins |
+| `add_up_value(rule, arg_sym)` | 100 | Operator overloading on argument symbols |
+| `add_rule(rule)` | 0 | Standard rule, indexed by head symbol |
+| `add_intercept_after(rule)` | -100 | Fires after builtins, as last resort |
 
 ---
 
@@ -324,9 +383,8 @@ evaluate(Expression(Module,
 
 - **No parser** -- expressions are constructed programmatically via `Expression(head, *args)`
 - **No lexer/AST** -- the `.m` example files are not yet parsed by this engine
-- **Limited built-ins** -- arithmetic and control flow only; no list manipulation, string, or logic functions
-- **No user-defined functions** -- `DownValues`/`UpValues` infrastructure exists but no syntactic sugar for defining them
-- **Performance** -- pure Python; no compilation or JIT
+- **Limited built-ins** -- arithmetic, control flow, comparison, and logic only; no list manipulation or string functions
+- **No syntactic sugar** -- `DownValues`/`UpValues` infrastructure exists but no shorthand syntax for defining them
 
 ---
 

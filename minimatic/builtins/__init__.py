@@ -66,6 +66,7 @@ from .control import (
     With,
 )
 from .io import Request
+from .lists import First, Last, Length, Part, Range
 from .registry import (
     BuiltinFunction,
     BuiltinRegistry,
@@ -144,6 +145,12 @@ __all__ = [
     "StringQ",
     "IntegerQ",
     "RealQ",
+    # Lists
+    "Length",
+    "Part",
+    "First",
+    "Last",
+    "Range",
     # Web
     "Request",
 ]

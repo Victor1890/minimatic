@@ -50,7 +50,11 @@ Every value in minimatic is an `Element`. Atoms are leaves; Symbols are named re
 
 **Why tuple subclass**: Same rationale as Symbol. An `Expression` is a 3-tuple at the C level. `hash()` and `eq()` are O(1) tuple operations. No per-instance memory beyond the tuple storage.
 
-**Immutable transformation API**: `with_head()`, `with_tail()`, `with_attrs()`, `map_args()`, `append()`, `prepend()` — all return new `Expression` objects, never mutate.
+**Immutable transformation API**: `with_head()`, `with_tail()`, `with_attrs()`, `without_attrs()`, `with_only_attrs()`, `map_args()`, `map_args_indexed()`, `append()`, `prepend()` — all return new `Expression` objects, never mutate.
+
+**Attribute queries**: `has_attr()`, `has_any_attr()`, `has_all_attrs()` — efficient attribute set membership checks.
+
+**Aliases**: `args` property is an alias for `tail`.
 
 **Design constraint**: `__slots__ = ()` means no instance attributes can be added. Extension of Expression must be external (decorators, registries, or additional methods at class definition time).
 
@@ -79,7 +83,9 @@ Python native types are used directly — no wrapper classes:
 
 **File**: `minimatic/eval/evaluator.py`
 
-The evaluator implements the 10-step Wolfram Language standard evaluation procedure:
+> **Deep dive**: See [EVAL.md](EVAL.md) for the full evaluation procedure with line references, component interaction diagrams, and thread safety details.
+
+The evaluator implements a 10-step evaluation procedure:
 
 ```
 1. Dispatch by type
@@ -158,6 +164,8 @@ Expression-level attributes take precedence (last wins in frozenset union). This
 
 Rules are tried in priority order within each type, then across types (UpValues → DownValues → SubValues → NValues → Built-in).
 
+**Storage implementation**: `EvaluationContext` stores values directly in a `_values: dict[Symbol, dict[str, Any]]` dict, accessed via typed accessors (`get_own_values()`, `get_down_values()`, etc.). The standalone `Values` dataclass and `ValueStore` class in `values.py` provide a type-annotated container and convenience functions, but the evaluator uses the context's built-in storage directly.
+
 ### 3.5 Rules
 
 **File**: `minimatic/eval/rules.py`
@@ -168,6 +176,35 @@ Two rule types:
 - **RuleDelayed** (`:>`): Delayed — RHS is substituted but not evaluated until next evaluation cycle
 
 Both support optional `condition` and `priority` for ordering.
+
+### 3.6 Rule Pipeline
+
+**File**: `minimatic/eval/pipeline.py`
+
+The evaluator delegates all rule dispatch to a `RulePipeline` instance (owned by each `EvaluationContext`). The pipeline replaces imperative rule application with a functional pattern-matching engine.
+
+**Pipeline components**:
+
+| Component | Purpose |
+|-----------|---------|
+| `RuleSource` | Enum of rule origins: `USER_INTERCEPT`, `UP_VALUES`, `DOWN_VALUES`, `SUB_VALUES`, `N_VALUES`, `BUILTIN` |
+| `PipelineRule` | Frozen dataclass: `(pattern, replacement, condition, source, priority)` |
+| `BuiltinFallback` | Frozen dataclass: `(symbol, implementation, attributes)` — wraps a builtin as a pipeline fallback |
+| `RulePipeline` | Indexed rule store with parent chaining; applies rules in priority order |
+
+**Rule application order** (in `RulePipeline.apply()`):
+
+1. **intercept_before** — user-defined rules that fire first
+2. **UpValues** — operator overloading on arguments (left-to-right)
+3. **DownValues** — function definitions on head symbol
+4. **SubValues** — subscripted function definitions (head is `Expression[sym, ...]`)
+5. **NValues** — numeric approximation (currently via DownValues on `N`)
+6. **Built-in fallback** — native implementation (calls directly, no substitution)
+7. **intercept_after** — user-defined rules that fire last
+
+**Three-level builtin resolution**: The pipeline checks (1) its own `_builtins` dict, (2) parent pipeline's `_builtins` (if scoped), then (3) falls back to the global `_registry` in `registry.py`. This ensures builtins registered via `@register_builtin` are always available, while scoped pipelines can override specific builtins.
+
+**Design note**: For pattern-based rules, the result is a substitution only — no evaluation occurs. The fixed-point loop in the evaluator handles re-evaluation. For builtins, the implementation is called directly and returns a fully evaluated result.
 
 ---
 
@@ -189,6 +226,7 @@ Both support optional `condition` and `priority` for ordering.
 | Optional | `Expression(Optional, pattern, default)` | Optional with default |
 | Repeated | `Expression(Repeated, pattern)` | One or more |
 | RepeatedNull | `Expression(RepeatedNull, pattern)` | Zero or more |
+| Except | `Expression(Except, pattern, alternative?)` | Exclusion match |
 | Verbatim | `Expression(Verbatim, expr)` | Literal match |
 | HoldPattern | `Expression(HoldPattern, pattern)` | Prevent pattern evaluation |
 
@@ -196,7 +234,7 @@ Both support optional `condition` and `priority` for ordering.
 
 ### 4.2 Matching Algorithm
 
-**File**: `minimatic/pattern/matcher.py` (871 lines)
+**File**: `minimatic/pattern/matcher.py` (828 lines)
 
 The matcher is a recursive descent engine with backtracking:
 
@@ -319,6 +357,58 @@ When no rules match (step 9e), the evaluator calls `dispatch_builtin(expr, conte
 | `Sum` | HoldRest | Iterated summation with iterator substitution |
 | `Product` | HoldRest | Iterated product with iterator substitution |
 
+**Comparison and Logic** (`minimatic/builtins/comparison.py`):
+
+| Function | Attributes | Semantics |
+|----------|------------|-----------|
+| `Less` | (none) | `a < b` |
+| `Greater` | (none) | `a > b` |
+| `LessEqual` | (none) | `a ≤ b` |
+| `GreaterEqual` | (none) | `a ≥ b` |
+| `Equal` | (none) | Mathematical equality (`1 == 1.0` → `True`) |
+| `Unequal` | (none) | `a ≠ b` |
+| `And` | HoldAll | Short-circuit AND (returns `False` on first `False`) |
+| `Or` | HoldAll | Short-circuit OR (returns `True` on first `True`) |
+| `Not` | (none) | Logical negation |
+| `EvenQ` | (none) | True if even integer |
+| `OddQ` | (none) | True if odd integer |
+
+**Control Flow** (`minimatic/builtins/control.py`):
+
+| Function | Attributes | Semantics |
+|----------|------------|-----------|
+| `Set` | HoldFirst | Immediate assignment (`x = value`) |
+| `SetDelayed` | HoldAll | Delayed assignment (`x := body`) |
+| `If` | HoldAll | Conditional (`If[cond, then, else]`) |
+| `Which` | HoldAll | Multi-way conditional (`Which[test1, val1, ...]`) |
+| `Switch` | HoldFirst | Pattern-based switch (`Switch[expr, pat1, val1, ...]`) |
+| `CompoundExpression` | HoldAll | Sequence of expressions, return last |
+| `Evaluate` | HoldAll | Force evaluation of held expression |
+| `ReleaseHold` | HoldAll | Unwrap and evaluate a held expression |
+| `Hold` | HoldAll | Prevent evaluation |
+| `HoldForm` | HoldAll | Prevent evaluation (display-oriented) |
+| `Do` | HoldAll | Iterate for side effects |
+| `While` | HoldAll | While loop |
+| `For` | HoldAll | C-style for loop |
+| `Table` | HoldAll | Collect results into a `List` |
+| `Nest` | HoldAll | Apply function n times |
+| `NestList` | HoldAll | Apply function n times, collect intermediates |
+| `Fold` | HoldAll | Left fold over a list |
+| `Map` | HoldFirst | Apply function to each element of a list |
+| `Module` | HoldAll | Lexical scoping (gensym'd local variables) |
+| `Block` | HoldAll | Dynamic scoping (temporarily sets values) |
+| `With` | HoldAll | Constant substitution (pre-evaluated bindings) |
+| `TrueQ` | (none) | Returns `True` if expression is `True` |
+| `SameQ` | (none) | Structural equality (`===`) |
+| `UnsameQ` | (none) | Structural inequality |
+| `NumericQ` | (none) | True if numeric |
+| `AtomQ` | (none) | True if atomic (not an Expression) |
+| `HeadQ` | (none) | True if head matches |
+| `ListQ` | (none) | True if head is `List` |
+| `StringQ` | (none) | True if a string |
+| `IntegerQ` | (none) | True if an integer |
+| `RealQ` | (none) | True if a real number |
+
 **I/O** (`minimatic/builtins/io.py`):
 
 | Function | Attributes | Semantics |
@@ -430,34 +520,39 @@ Expressions are constructed programmatically via `Expression(Plus, 1, 2, 3)`. Th
 
 ```
 minimatic/
+├── __init__.py           Public API
+│
 ├── core/
-│   ├── symbol.py        248 lines   Immutable interned symbols
-│   ├── expression.py    335 lines   Immutable expressions (head, tail, attrs)
-│   ├── atoms.py         186 lines   Python-native primitives as atoms
-│   └── attributes.py    232 lines   Evaluation attribute symbols
+│   ├── __init__.py       Package re-exports
+│   ├── symbol.py         Immutable interned symbols
+│   ├── expression.py     Immutable expressions (head, tail, attrs)
+│   ├── atoms.py          Python-native primitives as atoms
+│   └── attributes.py     Evaluation attribute symbols
 │
 ├── pattern/
-│   ├── blanks.py        372 lines   Blank, BlankSequence, BlankNullSequence
-│   ├── structural.py    568 lines   Pattern, Condition, Alternatives, etc.
-│   ├── bindings.py      376 lines   Immutable match result bindings
-│   └── matcher.py       871 lines   Core matching engine with backtracking
+│   ├── __init__.py       Package re-exports
+│   ├── blanks.py         Blank, BlankSequence, BlankNullSequence
+│   ├── structural.py     Pattern, Condition, Alternatives, Except, etc.
+│   ├── bindings.py       Immutable match result bindings
+│   └── matcher.py        Core matching engine with backtracking
 │
 ├── eval/
-│   ├── evaluator.py     479 lines   Standard evaluation procedure (10 steps)
-│   ├── context.py       207 lines   Evaluation contexts with scoping
-│   ├── rules.py         166 lines   Rule and RuleDelayed types
-│   ├── values.py        184 lines   Value type storage (OwnValues, DownValues, ...)
-│   └── transforms.py    211 lines   Sequence flattening, Flat, Orderless, Listable
+│   ├── __init__.py       Package re-exports
+│   ├── evaluator.py      Standard evaluation procedure
+│   ├── pipeline.py       RulePipeline, PipelineRule, BuiltinFallback
+│   ├── context.py        Evaluation contexts with scoping
+│   ├── rules.py          Rule and RuleDelayed types
+│   ├── values.py         Value type storage (OwnValues, DownValues, ...)
+│   └── transforms.py     Sequence flattening, Flat, Orderless, Listable
 │
 ├── builtins/
-│   ├── registry.py      141 lines   @register_builtin + BuiltinRegistry
-│   ├── arithmetic.py    598 lines   Plus, Times, Power, and related operations
-│   └── io.py             78 lines   HTTP Request builtin
-│
-└── __init__.py           41 lines   Public API
+│   ├── __init__.py       Package re-exports
+│   ├── registry.py       @register_builtin + BuiltinRegistry
+│   ├── arithmetic.py     Plus, Times, Power, and related operations
+│   ├── comparison.py     Less, Greater, Equal, And, Or, Not, etc.
+│   ├── control.py        Set, If, Which, Module, Block, Map, etc.
+│   └── io.py             HTTP Request builtin
 ```
-
-**Total**: ~4,415 lines of implementation code.
 
 ---
 
@@ -467,14 +562,15 @@ Tests are organized to mirror the source structure:
 
 ```
 tests/
-├── test_core/           Symbol, Expression, Atoms, Attributes
-├── test_pattern/        Blanks, Structural, Bindings, Matcher
-├── test_eval/           Evaluator, Context, Values, Rules, Transforms
-└── test_builtins/       Registry, Arithmetic, IO
+├── conftest.py             Shared fixtures
+├── test_core/              Symbol, Expression, Atoms, Attributes
+├── test_pattern/           Blanks, Structural, Bindings, Matcher
+├── test_eval/              Evaluator, Context, Values, Rules, Transforms, Pipeline
+└── test_builtins/          Registry, Arithmetic, Comparison, Control, IO
 ```
 
 Key testing patterns:
-- `conftest.py` provides shared fixtures: `ctx`, `Plus`, `Times`, `x`, `y`, `z`
+- `conftest.py` provides shared fixtures: `ctx`, `Plus`, `Times`, `Power`, `x`, `y`, `z`, plus an autouse `_clean_symbol_cache` fixture that clears the symbol cache between tests
 - Tests use `GlobalContext` directly (no setup/teardown needed)
 - Builtin tests import the module to trigger `@register_builtin` side effects
 - Pattern tests construct expressions programmatically (no parser)

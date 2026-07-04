@@ -5,9 +5,14 @@ Provides symbol tables, attribute storage, and value storage
 with support for nested scopes and context chaining.
 """
 
+from __future__ import annotations
+
 import threading
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .pipeline import RulePipeline
 
 from minimatic.core import Symbol
 
@@ -34,6 +39,11 @@ class EvaluationContext:
 
         # Consolidated value storage: Symbol -> {type_key: value}
         self._values: dict[Symbol, dict[str, Any]] = {}
+
+        # Functional rule pipeline
+        from .pipeline import RulePipeline
+
+        self._pipeline = RulePipeline(parent=parent.pipeline if parent else None)
 
     def get_symbol(self, name: str) -> Symbol | None:
         """Get symbol by name, checking parent contexts if not found."""
@@ -141,6 +151,11 @@ class EvaluationContext:
         """Clear all values for a symbol."""
         if sym in self._values:
             del self._values[sym]
+
+    @property
+    def pipeline(self) -> RulePipeline:
+        """Get the rule pipeline for this context."""
+        return self._pipeline
 
     def __repr__(self) -> str:
         return f"EvaluationContext({self.name!r})"
