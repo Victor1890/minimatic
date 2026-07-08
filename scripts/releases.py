@@ -98,7 +98,7 @@ def fail(msg: str) -> None:
 def normalize_repo_url(raw_url: str | None) -> str:
     """Normalize git remote URLs into browser-safe HTTPS URLs."""
 
-    DEFAULT_REPO_URL = "https://github.com/Victor1890/minimatic"
+    DEFAULT_REPO_URL = "https://github.com/gabrielebaez/minimatic"
 
     if not raw_url or not isinstance(raw_url, str):
         return DEFAULT_REPO_URL
