@@ -9,6 +9,9 @@ wheels/
 *.egg-info
 .DS_Store
 
+# Release script temp file
+.release-notes-tmp.md
+
 # Virtual environments
 .venv
 .vscode
