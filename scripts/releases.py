@@ -316,10 +316,27 @@ def create_release_context(bump: str) -> ReleaseContext:
 
 
 # ── Release steps ───────────────────────────────────────────────────────────
+def check_gh_cli() -> None:
+    try:
+        run("gh --version", cwd=REPO_ROOT)
+    except RuntimeError:
+        fail(
+            "GitHub CLI (gh) is not installed or not on PATH."
+            " Install it: https://cli.github.com"
+        )
+    try:
+        run("gh auth status", cwd=REPO_ROOT)
+    except RuntimeError:
+        fail(
+            "GitHub CLI is not authenticated."
+            " Run `gh auth login` and retry the release."
+        )
+
+
 def ensure_release_preconditions() -> None:
     current_branch = run("git branch --show-current", cwd=REPO_ROOT)
-    if current_branch != "main":
-        fail(f"The release can only be run on main. Current branch: {current_branch}")
+    if current_branch != "master":
+        fail(f"The release can only be run on master. Current branch: {current_branch}")
 
     status = run("git status --porcelain -- .", cwd=REPO_ROOT)
     dirty = [f for f in status.splitlines() if f.strip()]
@@ -499,6 +516,9 @@ def main() -> None:
     signal.signal(signal.SIGTERM, handle_signal)
 
     print(f"\n📦 minimatic {ctx.current_version} → {ctx.new_version} ({ctx.bump})\n")
+
+    # 0. Verify GitHub CLI is installed and authenticated.
+    check_gh_cli()
 
     # 1. Ensure release is run only on main and from a fully clean working tree.
     ensure_release_preconditions()
